@@ -157,7 +157,7 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     printf("  Read %ld short ints (16 bits) from the WAV file\n", nr);
     
     realin=(float*) fftwf_malloc(sizeof(float)*nfft1);
-    fftout=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*(nfft1/2+1));
+    fftout=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*(nfft1/2+1)); // why divided by two?
     PLAN1 = fftwf_plan_dft_r2c_1d(nfft1, realin, fftout, PATIENCE);
    
     // scale short int values to between -1 and 1 and copy into realin
@@ -181,12 +181,13 @@ unsigned long readwavfile(char *ptr_to_infile, int ntrmin, float *idat, float *q
     for (i=0; i<(size_t)nfft2; i++) {
         j=i0+i;
         if( i>(size_t)nh2 ) j=j-nfft2;
-	printf("  i=%ld j=%ld\n", i , j);
+	//printf("  i=%ld j=%ld\n", i , j);
         fftin[i][0]=fftout[j][0];
         fftin[i][1]=fftout[j][1];
     }
     // the first half of fftin is fftout[184320 - 207360] (1500 Hz to 1688 Hz)
-    // the second half of fftin is fftout[161281 - 184319] (1313 Hz to 1500 hz) 
+    // the second half of fftin is fftout[161281 - 184319] (1313 Hz to 1500 hz)
+    // fftin holds 375 Hz of bandwidth around 1500 Hz 
     
     fftwf_free(fftout);
     fftout=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*nfft2);
@@ -765,6 +766,7 @@ int main(int argc, char *argv[])
     struct snode * stack=NULL;
     unsigned int npoints, cycles, maxnp, metric;
     float df=375.0/256.0/2;
+    printf("df=%f\n", df);
     float fsymbs[162];
     float dt=1.0/375.0, dt_print;
     double dialfreq_cmdline=0.0, dialfreq, freq_print;
@@ -960,6 +962,7 @@ int main(int argc, char *argv[])
             return 1;
         }
         dialfreq=dialfreq_cmdline - (dialfreq_error*1.0e-06);
+	printf("dialfreq=%f\n", dialfreq); 
     } else if ( strstr(ptr_to_infile,".c2") !=0 )  {
         ptr_to_infile_suffix=strstr(ptr_to_infile,".c2");
         npoints=readc2file(ptr_to_infile, idat, qdat, &dialfreq, &wspr_type);
@@ -980,16 +983,19 @@ int main(int argc, char *argv[])
     uttime[4]='\0';
     
     // Do windowed ffts over 2 symbols, stepped by half symbols
+    // npoints should be 46080
     int nffts=4*floor(npoints/512)-1;
+    printf("nffts=%d\n", nffts);
     fftin=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*512);
     fftout=(fftwf_complex*) fftwf_malloc(sizeof(fftwf_complex)*512);
     PLAN3 = fftwf_plan_dft_1d(512, fftin, fftout, FFTW_FORWARD, PATIENCE);
     
     float ps[512][nffts];
-    float w[512];
+    float w[512]; // what is this?
     for(i=0; i<512; i++) {
         w[i]=sin(0.006147931*i);
     }
+    // w is the first half of a sine curve
     
     if( usehashtable ) {
         char line[80], hcall[13], hgrid[5];
@@ -1020,31 +1026,59 @@ int main(int argc, char *argv[])
             minsync2=0.10;
         }
         ndecodes_pass=0;   // still needed?
-        
+       
+        // for one of the windows, let's save some data
+	int window_index = 0;
+	FILE *fp;
+	char filename[64];
+	sprintf(filename, "window-%d.csv", ipass);
         for (i=0; i<nffts; i++) {
+	    if (i == window_index) {
+	    	fp = fopen(filename, "w");
+		fprintf(fp,"i,idat,w,idat * w\n");
+	    }
             for(j=0; j<512; j++ ) {
-                k=i*128+j;
-                fftin[j][0]=idat[k] * w[j];
+                k=i*128+j; // 128 being a quarter of our window size
+                fftin[j][0]=idat[k] * w[j]; // looks like we're weighting the samples in the middle with a sin function
                 fftin[j][1]=qdat[k] * w[j];
+		if (i == window_index) {
+		    fprintf(fp, "%d,%f,%f,%f\n", k, idat[k], w[j], idat[k] * w[j]);
+		}
             }
+	    if (i == window_index) {
+	    	fclose(fp);
+	    }
             fftwf_execute(PLAN3);
             for (j=0; j<512; j++ ) {
                 k=j+256;
                 if( k>511 )
                     k=k-512;
-                ps[j][i]=fftout[k][0]*fftout[k][0]+fftout[k][1]*fftout[k][1];
+                ps[j][i]=fftout[k][0]*fftout[k][0]+fftout[k][1]*fftout[k][1]; // power
+		//printf("k=%d\n", k);
             }
         }
         
         // Compute average spectrum
+	// average or total?
         for (i=0; i<512; i++) psavg[i]=0.0;
         for (i=0; i<nffts; i++) {
             for (j=0; j<512; j++) {
                 psavg[j]=psavg[j]+ps[j][i];
             }
         }
-        
+	// psavg is the _total_ of a freq index of each FFT
+
+	// save psavg
+	sprintf(filename, "psavg-%d.csv", ipass);
+	fp = fopen(filename, "w");
+	fprintf(fp, "i,psavg\n");
+	for (i = 0; i < 512; i++) {
+	    fprintf(fp, "%d,%f\n", i, psavg[i]);
+	}
+	fclose(fp);
+
         // Smooth with 7-point window and limit spectrum to +/-150 Hz
+	// (delta f / i) is 300/411 (0.73)?
         int window[7]={1,1,1,1,1,1,1};
         float smspec[411];
         for (i=0; i<411; i++) {
@@ -1054,6 +1088,17 @@ int main(int argc, char *argv[])
                 smspec[i]=smspec[i]+window[j+3]*psavg[k];
             }
         }
+	// for each index sum up the three previous powers, this power, and the three following powers
+	// store in smspec (smooth spectrum?)
+
+	// save smspec
+	sprintf(filename, "smspec-%d.csv", ipass);
+	fp = fopen(filename, "w");
+	fprintf(fp, "i,smspec\n");
+	for (i = 0; i < 411; i++) {
+	    fprintf(fp, "%d,%f\n", i, smspec[i]);
+	}
+	fclose(fp);
         
         // Sort spectrum values, then pick off noise level as a percentile
         float tmpsort[411];
@@ -1061,6 +1106,11 @@ int main(int argc, char *argv[])
             tmpsort[j]=smspec[j];
         }
         qsort(tmpsort, 411, sizeof(float), floatcomp);
+
+	/*
+	for (int i = 0; i < 411; i++) {
+	    printf("%f\n", tmpsort[i]);
+	}*/
         
         // Noise level of spectrum is estimated as 123/411= 30'th percentile
         float noise_level = tmpsort[122];
@@ -1071,17 +1121,26 @@ int main(int argc, char *argv[])
          * The corresponding threshold is -42.3 dB in 2500 Hz bandwidth for WSPR-15. */
         
         float min_snr, snr_scaling_factor;
-        min_snr = pow(10.0,-8.0/10.0); //this is min snr in wspr bw
+        min_snr = pow(10.0,-8.0/10.0); //this is min snr in wspr bw (bw stands for bandwidth)
         if( wspr_type == 2 ) {
             snr_scaling_factor=26.3;
         } else {
             snr_scaling_factor=35.3;
         }
         for (j=0; j<411; j++) {
-            smspec[j]=smspec[j]/noise_level - 1.0;
+            smspec[j]=smspec[j]/noise_level - 1.0; // scale by the noise floor shifting the noise to zero
             if( smspec[j] < min_snr) smspec[j]=0.1*min_snr;
             continue;
         }
+
+	// save smspec with SNR normalization
+	sprintf(filename, "smspec-snr-%d.csv", ipass);
+	fp = fopen(filename, "w");
+	fprintf(fp, "Frequency,SNR\n");
+	for (i = 0; i < 411; i++) {
+	    fprintf(fp, "%f,%f\n", (i-205)*df, smspec[i]);
+	}
+	fclose(fp);
         
         // Find all local maxima in smoothed spectrum.
         for (i=0; i<200; i++) {
@@ -1141,6 +1200,13 @@ int main(int argc, char *argv[])
                 }
             }
         }
+
+	printf("Initial candidates:\n");
+	for (i = 0; i < npk; i++) {
+	    printf("  %d: freq=%f snr=%f shift=%d drift=%f sync=%f\n", i,
+			    candidates[i].freq, candidates[i].snr, candidates[i].shift,
+			    candidates[i].drift, candidates[i].sync);
+	}
         
         t0=clock();
         
@@ -1163,49 +1229,80 @@ int main(int argc, char *argv[])
          span of 162 symbols, with deviation equal to 0 at the center of the
          signal vector.
          */
+
+	//ps is the power spectrums where the first index is time and the second is freq 
         
         int idrift,ifr,if0,ifd,k0;
         int kindex;
         float smax,ss,pow,p0,p1,p2,p3;
+	if (ipass == 0) {
+	    fp = fopen("drift.csv", "w");
+	    fprintf(fp, "idrift,sync1\n");
+	}
         for(j=0; j<npk; j++) {                              //For each candidate...
+	    // initialize smax to a very small number
             smax=-1e30;
-            if0=candidates[j].freq/df+256;
-            for (ifr=if0-2; ifr<=if0+2; ifr++) {                      //Freq search
-                for( k0=-10; k0<22; k0++) {                             //Time search
+	    // if0 is the center frequency of this candidate in index units
+            if0=candidates[j].freq/df+256; // remember positive first half negative offset second half
+            for (ifr=if0-2; ifr<=if0+2; ifr++) {                      //Freq search (from -2 index units to 2 index units)
+                for( k0=-10; k0<22; k0++) {                             //Time search (from -10 index units to 22 index units, look up index units)
                     for (idrift=-maxdrift; idrift<=maxdrift; idrift++) {  //Drift search
                         ss=0.0;
                         pow=0.0;
                         for (k=0; k<162; k++) {                             //Sum over symbols
-                            ifd=ifr+((float)k-81.0)/81.0*( (float)idrift )/(2.0*df);
+			    // ((float)k - 81.0) / 81.0) will vary linearly from -1 to 1 as k goes through all symbols
+                            ifd=ifr+((float)k-81.0)/81.0*( (float)idrift )/(2.0*df); // it's a drift of frequency
                             kindex=k0+2*k;
-                            if( kindex < nffts ) {
+			    //printf("%d\n", kindex);
+                            if(( kindex < nffts ) && ( kindex >= 0 )) {
                                 p0=ps[ifd-3][kindex];
                                 p1=ps[ifd-1][kindex];
                                 p2=ps[ifd+1][kindex];
                                 p3=ps[ifd+3][kindex];
-                                
+
                                 p0=sqrt(p0);
                                 p1=sqrt(p1);
                                 p2=sqrt(p2);
                                 p3=sqrt(p3);
-                                
+
+				/*if (kindex < 0) {
+				    printf("p0=%f p1=%f p2=%f p3=%f\n", p0, p1, p2, p3);
+				}*/
+                               
+				// pr3 is the sync vector
+				// ss is the sum of the "syncs" where our sync vector bit was well detected
                                 ss=ss+(2*pr3[k]-1)*((p1+p3)-(p0+p2));
+				// total power in all four positions
                                 pow=pow+p0+p1+p2+p3;
                             }
                         }
                         sync1=ss/pow;
                         if( sync1 > smax ) {                  //Save coarse parameters
                             smax=sync1;
-                            candidates[j].shift=128*(k0+1);
+                            candidates[j].shift=128*(k0+1); // in time, what are the units?
                             candidates[j].drift=idrift;
                             candidates[j].freq=(ifr-256)*df;
                             candidates[j].sync=sync1;
                         }
+			// record the drift loop values for the first pass, first candidate, center frequency, no time adjustment
+			if (ipass == 0 && j == 0 && ifr == if0 && k0 == 0) {
+			    fprintf(fp, "%d,%f\n", idrift, sync1);
+			}
                     }
                 }
             }
         }
+	if (ipass == 0) {
+            fclose(fp);
+	}
         tcandidates += (float)(clock()-t0)/CLOCKS_PER_SEC;
+
+	printf("Coarse candidates:\n");
+	for (i = 0; i < npk; i++) {
+	    printf("  %d: freq=%f snr=%f shift=%d drift=%f sync=%f\n", i,
+			    candidates[i].freq, candidates[i].snr, candidates[i].shift,
+			    candidates[i].drift, candidates[i].sync);
+	}
         
         /*
          Refine the estimates of freq, shift using sync as a metric.
@@ -1498,7 +1595,7 @@ int main(int argc, char *argv[])
             printf("Writing %s\n",c2filename);
             writec2file(c2filename, wsprtype, carrierfreq, idat, qdat);
         }
-    }
+    } // main loop ends here
     
     // sort the result in order of increasing frequency
     struct result temp;
@@ -1511,10 +1608,11 @@ int main(int argc, char *argv[])
             }
         }
     }
-    
+   
+    printf("time snr  dt    freq      drift message\n");
     for (i=0; i<uniques; i++) {
-        printf("%4s %3.0f %4.1f %10.6f %2d  %-s \n",
-               decodes[i].time, decodes[i].snr,decodes[i].dt, decodes[i].freq,
+        printf("%4s %3.0f %4.1f %10.6f %2d     %-s \n",
+               decodes[i].time, decodes[i].snr, decodes[i].dt, decodes[i].freq,
                (int)decodes[i].drift, decodes[i].message);
         fprintf(fall_wspr,
                 "%6s %4s %3.0f %5.2f %11.7f  %-22s %2d %5.2f %2d %2d %4d %2d %3d %5u %5d\n",
