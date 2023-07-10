@@ -216,6 +216,8 @@ void sync_and_demodulate(float *id, float *qd, long np,
      *        2: no frequency or time lag search. calculate soft-decision   *
      *           symbols using passed frequency and shift.                  *
      ************************************************************************/
+    printf("sync_and_demodulate(np=%ld, float=%f, ifmin=%d, ifmax=%d, fstep=%f, shift1=%d, lagmin=%d, lagmax=%d, lagstep=%d, mode=%d)\n",
+		    np, *f1, ifmin, ifmax, fstep, *shift1, lagmin, lagmax, lagstep, mode);
     
     static float fplast=-10000.0;
     static float dt=1.0/375.0, df=375.0/256.0;
@@ -235,7 +237,8 @@ void sync_and_demodulate(float *id, float *qd, long np,
     if( mode == 0 ) {ifmin=0; ifmax=0; fstep=0.0; f0=*f1;}
     if( mode == 1 ) {lagmin=*shift1;lagmax=*shift1;f0=*f1;}
     if( mode == 2 ) {lagmin=*shift1;lagmax=*shift1;ifmin=0;ifmax=0;f0=*f1;}
-    
+   
+    // dt is 1.0/375
     twopidt=2*pi*dt;
     for(ifreq=ifmin; ifreq<=ifmax; ifreq++) {
         f0=*f1+ifreq*fstep;
@@ -244,7 +247,9 @@ void sync_and_demodulate(float *id, float *qd, long np,
             totp=0.0;
             for (i=0; i<162; i++) {
                 fp = f0 + (*drift1/2.0)*((float)i-81.0)/81.0;
-                if( i==0 || (fp != fplast) ) {  // only calculate sin/cos if necessary
+		//printf("  fp=%f\n", fp);
+                if( i==0 || (fp != fplast) ) {  // only calculate sin/cos if necessary (should this be outside the loop?)
+		    //phi is used to build a cosine or sine wave step by step
                     dphi0=twopidt*(fp-df15);
                     cdphi0=cos(dphi0);
                     sdphi0=sin(dphi0);
@@ -260,15 +265,20 @@ void sync_and_demodulate(float *id, float *qd, long np,
                     dphi3=twopidt*(fp+df15);
                     cdphi3=cos(dphi3);
                     sdphi3=sin(dphi3);
-                    
+                  
+		    //fourier coefficients?
+		    //https://en.wikipedia.org/wiki/Discrete_Fourier_transform
+		    //https://gru.stanford.edu/doku.php/tutorials/fouriertransformcomputation
                     c0[0]=1; s0[0]=0;
                     c1[0]=1; s1[0]=0;
                     c2[0]=1; s2[0]=0;
                     c3[0]=1; s3[0]=0;
-                    
+                   
+		    // c is the real coefficient
+		    // s is the imaginary coefficient
                     for (j=1; j<256; j++) {
-                        c0[j]=c0[j-1]*cdphi0 - s0[j-1]*sdphi0;
-                        s0[j]=c0[j-1]*sdphi0 + s0[j-1]*cdphi0;
+                        c0[j]=c0[j-1]*cdphi0 - s0[j-1]*sdphi0; //real component: cos(2*pi*f) - sin(2*pi*f) = e^-2*pi*f
+                        s0[j]=c0[j-1]*sdphi0 + s0[j-1]*cdphi0; //imag component: sin(2*pi*f) + cos(2*pi*f) = e^2*pi*f
                         c1[j]=c1[j-1]*cdphi1 - s1[j-1]*sdphi1;
                         s1[j]=c1[j-1]*sdphi1 + s1[j-1]*cdphi1;
                         c2[j]=c2[j-1]*cdphi2 - s2[j-1]*sdphi2;
@@ -334,18 +344,19 @@ void sync_and_demodulate(float *id, float *qd, long np,
         return;
     }
     
-    if( mode == 2 ) {
+    if( mode == 2 ) { // how would you get here if it isn't mode 2?
         *sync=syncmax;
+	// MOSSOM: mean of squares minus square of means
         for (i=0; i<162; i++) {              //Normalize the soft symbols
-            fsum=fsum+fsymb[i]/162.0;
-            f2sum=f2sum+fsymb[i]*fsymb[i]/162.0;
+            fsum=fsum+fsymb[i]/162.0; // mean
+            f2sum=f2sum+fsymb[i]*fsymb[i]/162.0; // mean of the squares
         }
-        fac=sqrt(f2sum-fsum*fsum);
+        fac=sqrt(f2sum-fsum*fsum); // standard deviation (square root of variance)
         for (i=0; i<162; i++) {
-            fsymb[i]=symfac*fsymb[i]/fac;
+            fsymb[i]=symfac*fsymb[i]/fac; // z-score times symfac
             if( fsymb[i] > 127) fsymb[i]=127.0;
             if( fsymb[i] < -128 ) fsymb[i]=-128.0;
-            symbols[i]=fsymb[i] + 128;
+            symbols[i]=fsymb[i] + 128; // make sure it fits in 8 unsigned bits
         }
         return;
     }
@@ -453,6 +464,7 @@ void noncoherent_sequence_detection(float *id, float *qd, long np,
             xi[j]=0.0; xq[j]=0.0;
             cm=1; sm=0;
             for (ib=0; ib<nblock; ib++) {
+		//printf("cm=%f sm=%f\n", cm, sm);
                 b=(j&(1<<(nblock-1-ib)))>>(nblock-1-ib);
                 itone=pr3[i+ib]+2*b;
                 xi[j]=xi[j]+is[itone][i+ib]*cm + qs[itone][i+ib]*sm;
@@ -558,10 +570,13 @@ void subtract_signal2(float *id, float *qd, long np,
                       float f0, int shift0, float drift0, unsigned char* channel_symbols)
 {
     float dt=1.0/375.0, df=375.0/256.0;
-    float pi=4.*atan(1.0), twopidt, phi=0, dphi, cs;
+    float pi=4.*atan(1.0);
+    float twopidt, phi=0, dphi, cs;
     int i, j, k, ii, nsym=162, nspersym=256,  nfilt=360; //nfilt must be even number.
     int nsig=nsym*nspersym;
     int nc2=45000;
+
+    printf("subtract_signal2(shift0=%d, drift0=%f)\n", shift0, drift0);
     
     float *refi, *refq, *ci, *cq, *cfi, *cfq;
     
@@ -601,6 +616,13 @@ void subtract_signal2(float *id, float *qd, long np,
             phi=phi+dphi;
         }
     }
+
+    FILE *fp = fopen("reference.csv", "w");
+    fprintf(fp, "i,refi,refq\n");
+    for (i = 0; i < nc2; i++) {
+	fprintf(fp, "%d,%f,%f\n", i, refi[i], refq[i]);
+    }
+    fclose(fp);
 
     float w[nfilt], norm=0, partialsum[nfilt]; 
     //lowpass filter and remove startup transient
@@ -778,7 +800,7 @@ int main(int argc, char *argv[])
     float *idat, *qdat;
     clock_t t0,t00;
     float tfano=0.0,treadwav=0.0,tcandidates=0.0,tsync0=0.0;
-    float tsync1=0.0,tsync2=0.0,tosd=0.0,ttotal=0.0;
+    float tsync1=0.0,tsync2=0.0,tosd=0.0,tsub2=0.0,ttotal=0.0;
     
     struct cand { float freq; float snr; int shift; float drift; float sync; };
     struct cand candidates[200];
@@ -1336,11 +1358,13 @@ int main(int argc, char *argv[])
             sync_and_demodulate(idat, qdat, npoints, symbols, &f1, ifmin, ifmax, fstep, &shift1,
                                 lagmin, lagmax, lagstep, &drift1, symfac, &sync1, 0);
             tsync0 += (float)(clock()-t0)/CLOCKS_PER_SEC;
+	    printf("Refined shift: %d\n", shift1);
             
             fstep=0.25; ifmin=-2; ifmax=2;
             t0 = clock();
             sync_and_demodulate(idat, qdat, npoints, symbols, &f1, ifmin, ifmax, fstep, &shift1,
                                 lagmin, lagmax, lagstep, &drift1, symfac, &sync1, 1);
+	    printf("Refined freq: %f\n", f1);
             
             if(ipass < 2) {
                 // refine drift estimate
@@ -1357,21 +1381,25 @@ int main(int argc, char *argv[])
                 if(syncp>sync1) {
                     drift1=driftp;
                     sync1=syncp;
+		    printf("Refined drift: %f\n", drift1);
                 } else if (syncm>sync1) {
                     drift1=driftm;
                     sync1=syncm;
+		    printf("Refined drift: %f\n", drift1);
                 }
             }
             tsync1 += (float)(clock()-t0)/CLOCKS_PER_SEC;
             
             // fine-grid lag and freq search
             if( sync1 > minsync1 ) {
+		printf("Further refining...\n");
                 
                 lagmin=shift1-32; lagmax=shift1+32; lagstep=16;
                 t0 = clock();
                 sync_and_demodulate(idat, qdat, npoints, symbols, &f1, ifmin, ifmax, fstep, &shift1,
                                     lagmin, lagmax, lagstep, &drift1, symfac, &sync1, 0);
                 tsync0 += (float)(clock()-t0)/CLOCKS_PER_SEC;
+		printf("Refined lag: %d\n", shift1);
                 
                 // fine search over frequency
                 fstep=0.05; ifmin=-2; ifmax=2;
@@ -1379,6 +1407,7 @@ int main(int argc, char *argv[])
                 sync_and_demodulate(idat, qdat, npoints, symbols, &f1, ifmin, ifmax, fstep, &shift1,
                                     lagmin, lagmax, lagstep, &drift1, symfac, &sync1, 1);
                 tsync1 += (float)(clock()-t0)/CLOCKS_PER_SEC;
+		printf("Refined freq: %f\n", f1);
                 
                 candidates[j].freq=f1;
                 candidates[j].shift=shift1;
@@ -1386,14 +1415,16 @@ int main(int argc, char *argv[])
                 candidates[j].sync=sync1;
             }
         }
-        
+
+	// dedupe part 1
         int nwat=0; 
         int idupe;
         for ( j=0; j<npk; j++) {
             idupe=0;
             for (k=0;k<nwat;k++) {
                 if( fabsf(candidates[j].freq - candidates[k].freq) < 0.05  &&
-                   abs(candidates[j].shift - candidates[k].shift) < 16 ) {
+                   abs(candidates[j].shift - candidates[k].shift) < 16 ) { // mention why shift matters
+		    printf("First dedupe: %d is %d (%f %d %f %d)\n", j, k, candidates[j].freq, candidates[j].shift, candidates[k].freq, candidates[k].shift); 
                     idupe=1;
                     break;
                 }
@@ -1405,7 +1436,8 @@ int main(int argc, char *argv[])
                 nwat++;
             }
         }
-        
+       
+	// attempt to decode
         int idt, ii, jittered_shift;
         float y,sq,rms;
         int ib, blocksize, bitmetric;
@@ -1426,13 +1458,16 @@ int main(int argc, char *argv[])
             while( ib <= nblocksize && not_decoded ) {
                 if (ib < 4) { blocksize=ib; bitmetric=0; }
                 if (ib == 4) { blocksize=1; bitmetric=1; }
+		printf("blocksize=%d\n", blocksize);
                 
                 idt=0; ii=0;
                 while ( not_decoded && idt<=(128/iifac)) {
+	            // what's going on here?
                     ii=(idt+1)/2;
                     if( idt%2 == 1 ) ii=-ii;
                     ii=iifac*ii;
                     jittered_shift=shift1+ii;
+		    // still playing with the freq a bit?
                     nhardmin=0; dmin=0.0;
                     
                     // Get soft-decision symbols
@@ -1537,9 +1572,13 @@ int main(int argc, char *argv[])
                 // sanity checks on grid and power, and return
                 // call_loc_pow string and also callsign (for de-duping).
                 noprint=unpk_(message,hashtab,loctab,call_loc_pow,callsign);
-                if( subtraction && !noprint ) {
+                if( subtraction && !noprint  && (ipass != (npasses - 1))) {
+	            printf("Subtracting on ipass=%d (out of %d)\n", ipass, npasses);
                     if( get_wspr_channel_symbols(call_loc_pow, hashtab, loctab, channel_symbols) ) {
+			printf("Subtracting out candidate %d\n", j);
+                        t0 = clock();
                         subtract_signal2(idat, qdat, npoints, f1, shift1, drift1, channel_symbols);
+                        tsub2 += (float)(clock()-t0)/CLOCKS_PER_SEC;
                         if(!osd_decode) nhardmin=count_hard_errors(symbols,channel_symbols);
                     } else {
                         break;
@@ -1655,6 +1694,7 @@ int main(int argc, char *argv[])
     fprintf(ftimer,"sync_and_demod(2)  %7.2f %7.2f\n",tsync2,tsync2/ttotal);
     fprintf(ftimer,"Stack/Fano decoder %7.2f %7.2f\n",tfano,tfano/ttotal);
     fprintf(ftimer,"OSD        decoder %7.2f %7.2f\n",tosd,tosd/ttotal);
+    fprintf(ftimer,"subract_signal_2() %7.2f %7.2f\n",tsub2,tsub2/ttotal);
     fprintf(ftimer,"-----------------------------------\n");
     fprintf(ftimer,"Total              %7.2f %7.2f\n",ttotal,1.0);
     
